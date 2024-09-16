@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhisperX Live Transcription</title>
+    <script>
+        let socket;
+        let audioContext;
+        let resampledBuffer = new Float32Array(0);
+
+        async function startRecording() {
+            document.getElementById('startButton').disabled = true;
+            document.getElementById('stopButton').disabled = false;
+            document.getElementById('output').innerHTML = '';
+            document.getElementById('status').textContent = 'Connecting...';
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new AudioContext();
+                const source = audioContext.createMediaStreamSource(stream);
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                processor.onaudioprocess = (e) => {
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    const resampledData = resampleAudio(inputData, audioContext.sampleRate, 16000);
+                    resampledBuffer = concatFloat32Arrays(resampledBuffer, resampledData);
+                    
+                    // Send data when we have accumulated about 1 second of audio
+                    if (resampledBuffer.length >= 16000) {
+                        sendAudioChunk(resampledBuffer);
+                        resampledBuffer = new Float32Array(0);
+                    }
+                };
+
+                socket = new WebSocket('ws://localhost:8000/ws');
+                socket.onopen = () => {
+                    document.getElementById('status').textContent = 'Connected';
+                };
+                socket.onmessage = (event) => {
+                    document.getElementById('output').innerHTML += event.data + '<br>';
+                };
+                socket.onerror = (error) => {
+                    console.error('WebSocket Error:', error);
+                    document.getElementById('status').textContent = 'Error: ' + error.message;
+                };
+                socket.onclose = () => {
+                    document.getElementById('status').textContent = 'Disconnected';
+                };
+            } catch (error) {
+                console.error('Error:', error);
+                document.getElementById('status').textContent = 'Error: ' + error.message;
+                stopRecording();
+            }
+        }
+
+        function stopRecording() {
+            document.getElementById('startButton').disabled = false;
+            document.getElementById('stopButton').disabled = true;
+
+            if (audioContext) {
+                audioContext.close();
+            }
+            if (socket) {
+                socket.close();
+            }
+        }
+
+        function sendAudioChunk(audioData) {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(audioData.buffer);
+            }
+        }
+
+        function resampleAudio(audioBuffer, originalSampleRate, targetSampleRate) {
+            const ratio = originalSampleRate / targetSampleRate;
+            const newLength = Math.round(audioBuffer.length / ratio);
+            const result = new Float32Array(newLength);
+            let offsetResult = 0;
+            let offsetBuffer = 0;
+            
+            while (offsetResult < result.length) {
+                const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+                let accum = 0, count = 0;
+                for (let i = offsetBuffer; i < nextOffsetBuffer && i < audioBuffer.length; i++) {
+                    accum += audioBuffer[i];
+                    count++;
+                }
+                result[offsetResult] = accum / count;
+                offsetResult++;
+                offsetBuffer = nextOffsetBuffer;
+            }
+            return result;
+        }
+
+        function concatFloat32Arrays(a, b) {
+            const result = new Float32Array(a.length + b.length);
+            result.set(a);
+            result.set(b, a.length);
+            return result;
+        }
+    </script>
+</head>
+<body>
+    <h1>WhisperX Live Transcription</h1>
+    <button id="startButton" onclick="startRecording()">Start Recording</button>
+    <button id="stopButton" onclick="stopRecording()" disabled>Stop Recording</button>
+    <div id="status">Ready</div>
+    <div id="output"></div>
+</body>
+</html>
